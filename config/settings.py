@@ -139,6 +139,16 @@ MAILERS = {
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TIMEZONE = "UTC"
 
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-due-sources": {
+        "task": "ingestion.tasks.dispatch_due_sources",
+        "schedule": 60.0,
+    },
+}
+
+
+
+
 # CatchBuys
 CATCHBUYS_BASE_URL = os.getenv("CATCHBUYS_BASE_URL", "")
 CATCHBUYS_API_TOKEN = os.getenv("CATCHBUYS_API_TOKEN", "")

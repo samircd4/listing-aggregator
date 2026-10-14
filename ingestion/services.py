@@ -134,7 +134,7 @@ def _alert(source, run):
         f"{run.error_summary}"
     )
     logger.warning("%s\n%s", subject, body)
-    
+
     if settings.ALERT_EMAILS:
         try:
             send_mail(subject, body, None, settings.ALERT_EMAILS)
@@ -159,7 +159,7 @@ def _update_health(source, run):
         _alert(source, run)
 
 
-def run_source(source, limit=None):
+def run_source(source, limit=None, heartbeat=None):
     """Run one source now. `limit` stops early (for testing): no removals, no health change."""
     run = IngestionRun.objects.create(source=source)
     now = run.started_at
@@ -176,6 +176,8 @@ def run_source(source, limit=None):
                 stopped_early = True
                 break
             seen += 1
+            if heartbeat and seen % 100 == 0:
+                heartbeat()
             try:
                 std = connector.to_standard(raw)
                 counts[_store(source, run, std, now)] += 1

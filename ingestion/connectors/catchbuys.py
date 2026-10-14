@@ -1,3 +1,4 @@
+import logging
 import time
 from collections import deque
 from datetime import datetime
@@ -10,8 +11,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from .base import BaseConnector, StandardListing
 from .normalize import make_fingerprint, money, ratio
 
-PAGE_SIZE = 100
+logger = logging.getLogger(__name__)
+
 MAX_ATTEMPTS = 5
+
+# The API sorts with ties, so one crawl can skip rows at page boundaries.
+# Each extra pass uses a different order and page size to fill the gaps.
+PASSES = [
+    {"sort": "added", "dir": "asc", "per_page": 100},
+    {"sort": "added", "dir": "desc", "per_page": 97},
+    {"sort": "price", "dir": "desc", "per_page": 89},
+    {"sort": "mrr", "dir": "asc", "per_page": 83},
+]
 
 # Checked by hand against the upstream sites (see docs/api-notes.md)
 CORRECTED = {"empireflippers"}
@@ -55,25 +66,31 @@ class CatchBuysConnector(BaseConnector):
     def fetch(self):
         self.complete = False
         seen = set()
-        page = 1
+        total = 0
         headers = {"Authorization": f"Bearer {self.token}"}
         with httpx.Client(headers=headers, timeout=30) as client:
-            while True:
-                params = {"per_page": PAGE_SIZE, "page": page, "sort": "added", "dir": "asc"}
-                body = self._get(client, params)
-                meta = body["meta"]
-                self.expected_total = meta["total"]
-                for record in body["data"]:
-                    record_id = record.get("id")
-                    if record_id is not None:
-                        if record_id in seen:
-                            continue
-                        seen.add(record_id)
-                    yield record
-                if not meta.get("has_more"):
+            for number, pass_params in enumerate(PASSES, start=1):
+                page = 1
+                while True:
+                    body = self._get(client, {**pass_params, "page": page})
+                    meta = body["meta"]
+                    total = meta["total"]
+                    self.expected_total = total
+                    for record in body["data"]:
+                        record_id = record.get("id")
+                        if record_id is not None:
+                            if record_id in seen:
+                                continue
+                            seen.add(record_id)
+                        yield record
+                    if not meta.get("has_more") or not body["data"]:
+                        break
+                    page += 1
+                logger.info("CatchBuys pass %s: %s of %s listings seen",
+                            number, len(seen), total)
+                if len(seen) >= total:
                     break
-                page += 1
-        self.complete = len(seen) >= self.expected_total
+        self.complete = len(seen) >= total
 
     def _throttle(self):
         """Never send more than max_per_minute requests in any 60-second span."""
@@ -90,7 +107,8 @@ class CatchBuysConnector(BaseConnector):
         for attempt in range(1, MAX_ATTEMPTS + 1):
             self._throttle()
             try:
-                response = client.get(f"{self.base_url}/listings", params=params)
+                response = client.get(
+                    f"{self.base_url}/listings", params=params)
             except httpx.TransportError:
                 if attempt == MAX_ATTEMPTS:
                     raise
@@ -156,6 +174,9 @@ class CatchBuysConnector(BaseConnector):
             data_quality=quality,
             source_created_at=rec.created_at,
             source_updated_at=rec.updated_at,
-            fingerprint=make_fingerprint(currency=currency, asking_price=price, annual_revenue=annual_revenue, listing_type=listing_type, ),
+            fingerprint=make_fingerprint(
+                currency=currency, asking_price=price,
+                annual_revenue=annual_revenue, listing_type=listing_type,
+            ),
             raw=raw,
         )

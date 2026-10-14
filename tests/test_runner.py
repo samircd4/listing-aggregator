@@ -105,3 +105,12 @@ def test_bad_record_does_not_stop_the_run(setup):
     run = services.run_source(source)
     assert run.failed_count == 1 and run.new_count == 2
     assert run.status == "partial"
+
+
+def test_heartbeat_is_called_every_100_records(setup):
+    source, connector = setup
+    connector.records = [{"id": i, "price": 100} for i in range(1, 251)]
+    beats = []
+    run = services.run_source(source, heartbeat=lambda: beats.append(1))
+    assert run.seen_count == 250
+    assert len(beats) == 2

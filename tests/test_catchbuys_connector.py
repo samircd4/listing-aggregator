@@ -7,11 +7,10 @@ import httpx
 import pytest
 import respx
 
-from ingestion.connectors.catchbuys import CatchBuysConnector
+from ingestion.connectors.catchbuys import PASSES, CatchBuysConnector
 
-FIXTURE = Path(__file__).parent / "fixtures" / "catchbuys" / "sample_records.json"
-
-
+FIXTURE = Path(__file__).parent / "fixtures" / \
+    "catchbuys" / "sample_records.json"
 BASE = "https://catchbuys.test/api/v1"
 
 
@@ -74,20 +73,34 @@ def test_fetch_reads_all_pages_and_skips_repeats(connector):
 
 
 @respx.mock
-def test_crawl_with_missing_rows_is_not_complete(connector):
-    respx.get(f"{BASE}/listings").mock(side_effect=[
+def test_second_pass_fills_gaps(connector):
+    route = respx.get(f"{BASE}/listings").mock(side_effect=[
         httpx.Response(200, json=page([1, 2], 1, False, 3)),
+        httpx.Response(200, json=page([3, 2], 1, False, 3)),
     ])
+    assert [r["id"] for r in connector.fetch()] == [1, 2, 3]
+    assert connector.complete is True
+    assert route.call_count == 2
+    assert route.calls[1].request.url.params["dir"] == "desc"
+
+
+@respx.mock
+def test_crawl_with_missing_rows_is_not_complete(connector):
+    route = respx.get(f"{BASE}/listings").mock(
+        return_value=httpx.Response(200, json=page([1, 2], 1, False, 3)))
     list(connector.fetch())
     assert connector.complete is False
+    assert route.call_count == len(PASSES)
 
 
 @respx.mock
 def test_429_waits_and_retries(connector, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("ingestion.connectors.catchbuys.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        "ingestion.connectors.catchbuys.time.sleep", sleeps.append)
     respx.get(f"{BASE}/listings").mock(side_effect=[
-        httpx.Response(429, headers={"retry-after": "30"}, text="<html>Too Many Requests</html>"),
+        httpx.Response(429, headers={"retry-after": "30"},
+                       text="<html>Too Many Requests</html>"),
         httpx.Response(200, json=page([1], 1, False, 1)),
     ])
     assert [r["id"] for r in connector.fetch()] == [1]

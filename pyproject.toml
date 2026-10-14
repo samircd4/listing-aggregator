@@ -1,7 +1,7 @@
 [project]
 name = "listing-aggregator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Modular aggregator for business-for-sale listings: ingests marketplace data, standardizes it, and tracks every change."
 readme = "README.md"
 authors = [
     { name = "samircd4", email = "samircd4@gmail.com" }
@@ -42,3 +42,6 @@ django-settings-module = "config.settings"
 DJANGO_SETTINGS_MODULE = "config.settings"
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.pyright]
+reportCallIssue = "none"
