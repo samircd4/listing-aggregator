@@ -16,3 +16,5 @@ staticfiles/
 celerybeat-schedule
 
 tests/fixtures/catchbuys/listings_*.json
+
+db.sqlite3*
