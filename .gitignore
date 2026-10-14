@@ -14,3 +14,5 @@ wheels/
 .pytest_cache/
 staticfiles/
 celerybeat-schedule
+
+tests/fixtures/catchbuys/listings_*.json

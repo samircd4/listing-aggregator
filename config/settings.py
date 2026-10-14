@@ -135,4 +135,13 @@ MAILERS = {
 }
 
 
+# Celery
+CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TIMEZONE = "UTC"
+
+# CatchBuys
+CATCHBUYS_BASE_URL = os.getenv("CATCHBUYS_BASE_URL", "")
+CATCHBUYS_API_TOKEN = os.getenv("CATCHBUYS_API_TOKEN", "")
+
+# Alerts
+ALERT_EMAILS = [e.strip() for e in os.getenv("ALERT_EMAILS", "").split(",") if e.strip()]

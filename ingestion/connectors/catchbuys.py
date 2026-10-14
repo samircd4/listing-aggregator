@@ -1,63 +1,161 @@
-from __future__ import annotations
-
-import os
-from typing import Any
+import time
+from collections import deque
+from datetime import datetime
+from decimal import Decimal
 
 import httpx
-from dotenv import load_dotenv
+from django.conf import settings
+from pydantic import BaseModel, ConfigDict, Field
+
+from .base import BaseConnector, StandardListing
+from .normalize import make_fingerprint, money, ratio
+
+PAGE_SIZE = 100
+MAX_ATTEMPTS = 5
+
+# Checked by hand against the upstream sites (see docs/api-notes.md)
+CORRECTED = {"empireflippers"}
+VERIFIED_AS_GIVEN = {"quietlight", "dealslide"}
 
 
-class CatchBuysClient:
-    """Client for the CatchBuys listings API."""
+class CatchBuysRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    def __init__(
-        self,
-        base_url: str | None = None,
-        api_token: str | None = None,
-        timeout: float = 30.0,
-    ) -> None:
-        load_dotenv()
+    id: int
+    source: str
+    source_id: str | None = None
+    name: str
+    url: str | None = None
+    listing_type: str | None = Field(default=None, alias="type")
+    industry: str | None = None
+    language: str | None = None
+    currency: str | None = None
+    asking_price: Decimal | None = None
+    monthly_revenue: Decimal | None = None
+    annual_revenue: Decimal | None = None
+    annual_profit: Decimal | None = None
+    profit_margin: Decimal | None = None
+    age_years: int | None = None
+    thumbnail_url: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
-        self.base_url = (base_url or os.getenv("CATCHBUYS_BASE_URL", "")).rstrip("/")
-        self.api_token = api_token or os.getenv("CATCHBUYS_API_TOKEN", "")
-        self.timeout = timeout
 
-        if not self.base_url:
-            raise ValueError("CATCHBUYS_BASE_URL is required")
-        if not self.api_token:
-            raise ValueError("CATCHBUYS_API_TOKEN is required")
+class CatchBuysConnector(BaseConnector):
+    slug = "catchbuys"
 
-    async def list_listings(
-        self,
-        *,
-        page: int = 1,
-        per_page: int | None = None,
-    ) -> dict[str, Any]:
-        """Fetch one page of listings from CatchBuys."""
-        if page < 1:
-            raise ValueError("page must be greater than or equal to 1")
-        if per_page is not None and per_page < 1:
-            raise ValueError("per_page must be greater than or equal to 1")
+    def __init__(self, source, base_url=None, token=None):
+        super().__init__(source)
+        self.base_url = (base_url or settings.CATCHBUYS_BASE_URL).rstrip("/")
+        self.token = token or settings.CATCHBUYS_API_TOKEN
+        self.max_per_minute = source.max_requests_per_minute
+        self._sent = deque()
 
-        params: dict[str, int] = {"page": page}
-        if per_page is not None:
-            params["per_page"] = per_page
+    # ---- fetching -------------------------------------------------------
+    def fetch(self):
+        self.complete = False
+        seen = set()
+        page = 1
+        headers = {"Authorization": f"Bearer {self.token}"}
+        with httpx.Client(headers=headers, timeout=30) as client:
+            while True:
+                params = {"per_page": PAGE_SIZE, "page": page, "sort": "added", "dir": "asc"}
+                body = self._get(client, params)
+                meta = body["meta"]
+                self.expected_total = meta["total"]
+                for record in body["data"]:
+                    record_id = record.get("id")
+                    if record_id is not None:
+                        if record_id in seen:
+                            continue
+                        seen.add(record_id)
+                    yield record
+                if not meta.get("has_more"):
+                    break
+                page += 1
+        self.complete = len(seen) >= self.expected_total
 
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_token}",
-        }
+    def _throttle(self):
+        """Never send more than max_per_minute requests in any 60-second span."""
+        while True:
+            now = time.monotonic()
+            while self._sent and now - self._sent[0] >= 60.0:
+                self._sent.popleft()
+            if len(self._sent) < self.max_per_minute:
+                break
+            time.sleep(60.0 - (now - self._sent[0]) + 0.05)
+        self._sent.append(time.monotonic())
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/listings",
-                params=params,
-                headers=headers,
-            )
+    def _get(self, client, params):
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            self._throttle()
+            try:
+                response = client.get(f"{self.base_url}/listings", params=params)
+            except httpx.TransportError:
+                if attempt == MAX_ATTEMPTS:
+                    raise
+                time.sleep(min(2**attempt, 30))
+                continue
+            if response.status_code == 429:  # body is HTML, so never parse it
+                wait = response.headers.get("retry-after", "30")
+                time.sleep((int(wait) if wait.isdigit() else 30) + 1)
+                continue
+            if response.status_code >= 500:
+                if attempt == MAX_ATTEMPTS:
+                    response.raise_for_status()
+                time.sleep(min(2**attempt, 30))
+                continue
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
+        raise RuntimeError(
+            "CatchBuys: still rate limited after several retries")
 
-        if not isinstance(payload, dict):
-            raise TypeError("CatchBuys listings response must be a JSON object")
+    # ---- mapping --------------------------------------------------------
+    def to_standard(self, raw):
+        rec = CatchBuysRecord.model_validate(raw)
+        annual_revenue = rec.annual_revenue
+        monthly_revenue = rec.monthly_revenue
+        annual_profit = rec.annual_profit
 
-        return payload
+        if rec.source in CORRECTED:
+            # CatchBuys read Empire Flippers' trailing-12-month figures as monthly (x12).
+            annual_revenue = rec.monthly_revenue
+            monthly_revenue = None if annual_revenue is None else annual_revenue / 12
+            annual_profit = None if rec.annual_profit is None else rec.annual_profit / 12
+            quality = "corrected"
+        elif rec.source in VERIFIED_AS_GIVEN:
+            quality = "as_given"
+        else:
+            quality = "unverified"
+
+        price = money(rec.asking_price)
+        annual_revenue = money(annual_revenue)
+        annual_profit = money(annual_profit)
+        currency = rec.currency or ""
+        listing_type = rec.listing_type or ""
+
+        return StandardListing(
+            external_id=str(rec.id),
+            upstream_source=rec.source,
+            upstream_id=rec.source_id or "",
+            name=rec.name,
+            url=rec.url or "",
+            listing_type=listing_type,
+            industry=rec.industry or "",
+            language=rec.language or "",
+            currency=currency,
+            age_years=rec.age_years,
+            thumbnail_url=rec.thumbnail_url or "",
+            asking_price=price,
+            annual_revenue=annual_revenue,
+            monthly_revenue=money(monthly_revenue),
+            annual_profit=annual_profit,
+            profit_margin=rec.profit_margin,
+            profit_multiple=ratio(price, annual_profit),
+            revenue_multiple=ratio(price, annual_revenue),
+            data_quality=quality,
+            source_created_at=rec.created_at,
+            source_updated_at=rec.updated_at,
+            fingerprint=make_fingerprint(currency=currency, asking_price=price, annual_revenue=annual_revenue, listing_type=listing_type, ),
+            raw=raw,
+        )

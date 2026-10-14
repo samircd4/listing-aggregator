@@ -36,7 +36,7 @@ services:
 
   worker:
     build: .
-    command: celery -A config worker -l info
+    command: celery -A config worker -l info --concurrency=2
     volumes:
       - .:/app
     env_file: .env
